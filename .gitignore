@@ -1,0 +1,14 @@
+# Local task notes
+tasks/
+
+# Local input/output lists
+*.txt
+
+# Build outputs
+better-cf-ip-c
+*.o
+*.out
+*.dSYM/
+
+# macOS metadata
+.DS_Store
