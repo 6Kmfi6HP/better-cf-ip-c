@@ -7,7 +7,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>       /* inet_pton, inet_ntop */
 /* Note: MinGW-w64 UCRT64 does NOT provide POSIX compat headers
-   (sys/socket.h, netinet/*.h, arpa/inet.h, sys/select.h, sys/time.h).
+   such as sys/socket.h, netinet/*.h, arpa/inet.h, sys/select.h.
    We use pure Winsock2 on this platform. */
 #else
 #define _GNU_SOURCE
@@ -53,16 +53,19 @@ static int wsa_init(void) {
     wsa_refcount++;
     return 0;
 }
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused)) static void wsa_cleanup(void) {
+#else
 static void wsa_cleanup(void) {
+#endif
     if (wsa_refcount > 0 && --wsa_refcount == 0) WSACleanup();
 }
 
 /* Winsock2 socket() returns SOCKET (uintptr_t); wrap to return int */
 #undef socket
-#define socket(d, t, p) ((int)WSASocketA((d), (t), (p), NULL, 0, 0))
+#define socket(d, t, p) ((int)(WSASocketA)((d), (t), (p), NULL, 0, 0))
 
 /* Socket close on Windows uses closesocket() */
-#undef socket_close
 #define socket_close(fd) closesocket((SOCKET)(fd))
 
 /* Non-blocking mode via ioctlsocket() on Windows */
@@ -71,10 +74,21 @@ static int set_fd_blocking(int fd, int blocking) {
     return ioctlsocket((SOCKET)(fd), FIONBIO, &mode) == 0 ? 0 : -1;
 }
 
+/* mkdir() is POSIX only; Windows mkdir takes one arg */
+#undef mkdir
+#define mkdir(path, mode) _mkdir(path)
+
+/* Winsock2 setsockopt/getsockopt take (const char *) optval, not (const void *) */
+#undef setsockopt
+#define setsockopt(s, l, o, v, n) \
+    ((setsockopt)((SOCKET)(s), (l), (o), (const char *)(v), (n)))
+#undef getsockopt
+#define getsockopt(s, l, o, v, n) \
+    ((getsockopt)((SOCKET)(s), (l), (o), (char *)(v), (n)))
+
 #else /* POSIX */
 
 /* Socket close on POSIX uses close() */
-#undef socket_close
 #define socket_close(fd) close(fd)
 
 #endif /* _WIN32 */
@@ -1687,7 +1701,9 @@ static void show_menu(void) {
 
 #ifndef UNIT_TESTING
 int main(int argc, char **argv) {
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
 #ifdef _WIN32
     if (wsa_init() != 0) {
         fprintf(stderr, "WSAStartup failed\n");
