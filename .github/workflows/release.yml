@@ -1,10 +1,9 @@
-name: CI
+name: Release
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - "v*"
 
 jobs:
   build:
@@ -43,43 +42,35 @@ jobs:
             mingw-w64-ucrt-x86_64-pkg-config
             make
 
-      # --- Linux: Install dependencies ---
+      # --- Install dependencies (non-Windows) ---
       - name: Install dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config
 
-      # --- macOS: Install dependencies ---
       - name: Install dependencies
         if: runner.os == 'macOS'
         run: brew install openssl pkg-config
 
-      # --- Build (non-Windows) ---
+      # --- Build ---
       - name: Build release
         if: runner.os != 'Windows'
         run: make release
 
-      # --- Build (Windows / MSYS2) ---
       - name: Build release
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: make release
 
-      # --- Linux-only: AddressSanitizer ---
-      - name: Build with AddressSanitizer
-        if: runner.os == 'Linux'
-        run: make asan
-
-      # --- Linux-only: Build and run tests ---
+      # --- Test (Linux only) ---
       - name: Build and run tests
         if: runner.os == 'Linux'
         run: make test
 
-      # --- Rename binary (non-Windows) ---
+      # --- Rename binary ---
       - name: Rename binary for upload
         if: runner.os != 'Windows'
         run: mv better-cf-ip-c ${{ matrix.artifact_name }}
 
-      # --- Rename binary (Windows / MSYS2) ---
       - name: Rename binary for upload
         if: runner.os == 'Windows'
         shell: msys2 {0}
@@ -92,4 +83,30 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_name }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # --- Download all platform artifacts ---
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # --- Generate SHA256 checksums ---
+      - name: Generate checksums
+        run: |
+          sha256sum artifacts/*/* > artifacts/checksums.txt
+          cat artifacts/checksums.txt
+
+      # --- Create GitHub Release ---
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*
+          prerelease: ${{ contains(github.ref_name, '-') }}

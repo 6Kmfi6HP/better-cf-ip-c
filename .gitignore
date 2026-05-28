@@ -6,6 +6,8 @@ tasks/
 
 # Build outputs
 better-cf-ip-c
+better-cf-ip-c.exe
+better-cf-ip-c-*
 *.o
 *.out
 *.dSYM/
