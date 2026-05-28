@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,9 +26,23 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <getopt.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
+#endif
+
+/* 可移植 strdup — 兼容非 POSIX 平台 */
+#if !defined(_POSIX_C_SOURCE) || _POSIX_C_SOURCE < 200809L
+static char *portable_strdup(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s) + 1;
+    char *p = (char *)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+#else
+#define portable_strdup strdup
 #endif
 
 #define MAX_DOWNLOAD_SIZE (32u * 1024u * 1024u)
@@ -90,6 +105,10 @@ static char speed_test_file[MAX_FILE_LEN] = "";
 
 static pthread_once_t rtt_ssl_once = PTHREAD_ONCE_INIT;
 static SSL_CTX *rtt_ssl_ctx = NULL;
+
+/* 全局选项 */
+static int opt_noninteractive = 0;  /* 非交互模式 */
+static int opt_json_output = 0;     /* JSON 输出模式 */
 
 /* ----------------------- 基础工具 ----------------------- */
 
@@ -162,7 +181,11 @@ static int file_exists(const char *path) {
 static int mkdir_p(const char *dir) {
     if (!dir || dir[0] == '\0' || strcmp(dir, ".") == 0) return 0;
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s", dir);
+    int n = snprintf(tmp, sizeof(tmp), "%s", dir);
+    if ((size_t)n >= sizeof(tmp)) {
+        /* 路径被截断，但仍可继续 */
+        tmp[sizeof(tmp) - 1] = '\0';
+    }
     size_t len = strlen(tmp);
     if (len == 0) return 0;
     if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
@@ -258,7 +281,7 @@ static int string_list_push_dup(StringList *list, const char *s) {
         list->items = new_items;
         list->cap = new_cap;
     }
-    list->items[list->len] = strdup(s ? s : "");
+    list->items[list->len] = portable_strdup(s ? s : "");
     if (!list->items[list->len]) return -1;
     list->len++;
     return 0;
@@ -355,7 +378,7 @@ static char *get_url_content(const char *target_url, size_t *out_len) {
         return NULL;
     }
     if (!mem.data) {
-        mem.data = strdup("");
+        mem.data = portable_strdup("");
         mem.len = 0;
     }
     if (out_len) *out_len = mem.len;
@@ -369,7 +392,7 @@ static StringList parse_ip_list(const char *content) {
     string_list_init(&list);
     if (!content) return list;
 
-    char *copy = strdup(content);
+    char *copy = portable_strdup(content);
     if (!copy) return list;
 
     char *saveptr = NULL;
@@ -434,10 +457,10 @@ static StringList get_random_ipv4s(const StringList *ip_list) {
     return random_ips;
 }
 
-static int split_colon_keep_empty(char *s, char parts[][32], int max_parts) {
+static int split_colon_keep_empty(const char *s, char parts[][32], int max_parts) {
     int count = 0;
-    char *start = s;
-    for (char *p = s; ; p++) {
+    const char *start = s;
+    for (const char *p = s; ; p++) {
         if (*p == ':' || *p == '\0') {
             if (count < max_parts) {
                 size_t len = (size_t)(p - start);
@@ -538,7 +561,7 @@ static void location_map_clear(void) {
 
 static void location_map_insert_locked(const char *iata, const char *city) {
     if (!iata || iata[0] == '\0') return;
-    uint32_t h = hash_iata(iata);
+    const uint32_t h = hash_iata(iata);
     for (size_t i = 0; i < LOCATION_TABLE_SIZE; i++) {
         size_t idx = (h + i) % LOCATION_TABLE_SIZE;
         if (!location_table[idx].used || strcmp(location_table[idx].iata, iata) == 0) {
@@ -556,7 +579,7 @@ static int lookup_data_center(const char *colo, char *out, size_t out_size) {
         return 0;
     }
     pthread_rwlock_rdlock(&location_lock);
-    uint32_t h = hash_iata(colo);
+    const uint32_t h = hash_iata(colo);
     for (size_t i = 0; i < LOCATION_TABLE_SIZE; i++) {
         size_t idx = (h + i) % LOCATION_TABLE_SIZE;
         if (!location_table[idx].used) break;
@@ -727,7 +750,7 @@ static int connect_tcp_timeout(const char *ip, int port, int timeout_ms, int *tc
     int fd = socket(ss.ss_family, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
-    int one = 1;
+    const int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     if (set_fd_blocking(fd, 0) != 0) {
@@ -885,7 +908,7 @@ static int read_headers_ssl(SSL *ssl, int fd, long long deadline_ms) {
 }
 
 static int test_rtt(const char *ip, int use_tls) {
-    int port = use_tls ? 443 : 80;
+    const int port = use_tls ? 443 : 80;
     int total_ms = 0;
 
     for (int i = 0; i < 3; i++) {
@@ -921,7 +944,8 @@ static int test_rtt(const char *ip, int use_tls) {
                 return 0;
             }
             SSL_set_fd(ssl, fd);
-            SSL_set_tlsext_host_name(ssl, "cloudflare.com");
+            char hostname[] = "cloudflare.com";
+            SSL_set_tlsext_host_name(ssl, hostname);
             rem = (int)(deadline - now_ms());
             if (rem > 0) set_socket_timeout_ms(fd, rem);
             if (rem > 0 && SSL_connect(ssl) == 1 &&
@@ -1005,15 +1029,34 @@ static RTTVector run_rtt_test(const StringList *ip_list, int task_num, int use_t
     ctx.ip_list = ip_list;
     ctx.use_tls = use_tls;
     ctx.total = (int)ip_list->len;
-    pthread_mutex_init(&ctx.index_mu, NULL);
-    pthread_mutex_init(&ctx.result_mu, NULL);
-    pthread_mutex_init(&ctx.progress_mu, NULL);
+    if (pthread_mutex_init(&ctx.index_mu, NULL) != 0) {
+        fprintf(stderr, "错误: 初始化互斥锁失败\n");
+        return empty;
+    }
+    if (pthread_mutex_init(&ctx.result_mu, NULL) != 0) {
+        pthread_mutex_destroy(&ctx.index_mu);
+        return empty;
+    }
+    if (pthread_mutex_init(&ctx.progress_mu, NULL) != 0) {
+        pthread_mutex_destroy(&ctx.result_mu);
+        pthread_mutex_destroy(&ctx.index_mu);
+        return empty;
+    }
     rtt_vector_init(&ctx.results);
 
     pthread_t *threads = (pthread_t *)calloc((size_t)task_num, sizeof(pthread_t));
-    if (!threads) return empty;
+    if (!threads) {
+        pthread_mutex_destroy(&ctx.progress_mu);
+        pthread_mutex_destroy(&ctx.result_mu);
+        pthread_mutex_destroy(&ctx.index_mu);
+        return empty;
+    }
 
-    for (int i = 0; i < task_num; i++) pthread_create(&threads[i], NULL, rtt_worker, &ctx);
+    for (int i = 0; i < task_num; i++) {
+        if (pthread_create(&threads[i], NULL, rtt_worker, &ctx) != 0) {
+            fprintf(stderr, "警告: 创建测试线程失败\n");
+        }
+    }
     for (int i = 0; i < task_num; i++) pthread_join(threads[i], NULL);
     free(threads);
 
@@ -1512,6 +1555,40 @@ static void update_data(void) {
     init_locations();
 }
 
+static void run_single_speed_test_cli(const char *ip, int port, int use_tls) {
+    if (!ip || ip[0] == '\0') {
+        fprintf(stderr, "错误: 未指定 IP 地址\n");
+        return;
+    }
+    int default_port = use_tls ? 443 : 80;
+    if (port <= 0 || port > 65535) port = default_port;
+
+    printf("正在测速 %s 端口 %d\n", ip, port);
+    SpeedResult sr = run_speed_test_simple(ip, port, use_tls);
+
+    if (opt_json_output) {
+        char dc[256] = "";
+        if (sr.data_center[0] != '\0') {
+            lookup_data_center(sr.data_center, dc, sizeof(dc));
+        }
+        printf("{\n");
+        printf("  \"ip\": \"%s\",\n", ip);
+        printf("  \"max_speed_kbps\": %d,\n", sr.max_speed_kbps);
+        printf("  \"tcp_ms\": %d,\n", sr.tcp_ms);
+        printf("  \"data_center\": \"%s\"\n", dc[0] ? dc : "");
+        printf("}\n");
+    } else {
+        if (sr.data_center[0] != '\0') {
+            char city[256];
+            lookup_data_center(sr.data_center, city, sizeof(city));
+            printf("%s 平均速度 %d kB/s, TCP延迟 %dms, 数据中心=%s\n",
+                   ip, sr.max_speed_kbps, sr.tcp_ms, city);
+        } else {
+            printf("%s 平均速度 %d kB/s, TCP延迟 %dms\n", ip, sr.max_speed_kbps, sr.tcp_ms);
+        }
+    }
+}
+
 static void show_menu(void) {
     char input[MAX_LINE_LEN];
     for (;;) {
@@ -1555,15 +1632,81 @@ static void show_menu(void) {
     }
 }
 
+#ifndef UNIT_TESTING
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
+    /* 解析 --data-dir 旧式参数 (保持兼容) */
     const char *env_dir = getenv("BETTER_CF_IP_DATA_DIR");
     if (env_dir && env_dir[0] != '\0') {
         snprintf(data_dir, sizeof(data_dir), "%s", env_dir);
     }
-    if (argc == 3 && strcmp(argv[1], "--data-dir") == 0) {
-        snprintf(data_dir, sizeof(data_dir), "%s", argv[2]);
+
+    /* getopt 参数解析 */
+    int opt_ip_type = 4;
+    int opt_use_tls = 1;
+    int opt_bandwidth = 1;
+    int opt_task_num = 50;
+    int opt_single_ip_mode = 0;
+    int opt_port = 0;
+    int opt_clear_cache_flag = 0;
+    int opt_update_flag = 0;
+    char opt_single_ip[MAX_IP_LEN] = "";
+
+    static struct option long_options[] = {
+        {"ipv4",       no_argument,       0, '4'},
+        {"ipv6",       no_argument,       0, '6'},
+        {"tls",        no_argument,       0, 't'},
+        {"plain",      no_argument,       0, 'p'},
+        {"json",       no_argument,       0, 'j'},
+        {"noninteractive", no_argument,   0, 'n'},
+        {"bandwidth",  required_argument, 0, 'b'},
+        {"single",     required_argument, 0, 's'},
+        {"port",       required_argument, 0, 'P'},
+        {"clear-cache",no_argument,       0, 'c'},
+        {"update",     no_argument,       0, 'u'},
+        {"data-dir",   required_argument, 0, 'd'},
+        {"help",       no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int c;
+    while ((c = getopt_long(argc, argv, "46tpjnb:s:P:cud:h", long_options, NULL)) != -1) {
+        switch (c) {
+            case '4': opt_ip_type = 4; break;
+            case '6': opt_ip_type = 6; break;
+            case 't': opt_use_tls = 1; break;
+            case 'p': opt_use_tls = 0; break;
+            case 'j': opt_json_output = 1; /* fall through */
+            case 'n': opt_noninteractive = 1; break;
+            case 'b': opt_bandwidth = (int)strtol(optarg, NULL, 10); break;
+            case 's': opt_single_ip_mode = 1; snprintf(opt_single_ip, sizeof(opt_single_ip), "%s", optarg); break;
+            case 'P': opt_port = (int)strtol(optarg, NULL, 10); break;
+            case 'c': opt_clear_cache_flag = 1; break;
+            case 'u': opt_update_flag = 1; break;
+            case 'd': snprintf(data_dir, sizeof(data_dir), "%s", optarg); break;
+            case 'h':
+                printf("用法: better-cf-ip-c [选项]\n");
+                printf("\n选项:\n");
+                printf("  -4, --ipv4             测试 IPv4（默认）\n");
+                printf("  -6, --ipv6             测试 IPv6\n");
+                printf("  -t, --tls              使用 TLS（默认）\n");
+                printf("  -p, --plain            不使用 TLS\n");
+                printf("  -j, --json             输出 JSON 格式\n");
+                printf("  -n, --noninteractive   非交互模式\n");
+                printf("  -b, --bandwidth N      设置目标带宽 (Mbps，默认 1)\n");
+                printf("  -s, --single IP        单 IP 测速\n");
+                printf("  -P, --port PORT        测速端口（默认 443/80）\n");
+                printf("  -c, --clear-cache      清空缓存\n");
+                printf("  -u, --update           更新数据\n");
+                printf("  -d, --data-dir DIR     数据目录\n");
+                printf("  -h, --help             显示帮助信息\n");
+                return 0;
+            default:
+                fprintf(stderr, "用法: better-cf-ip-c [选项]\n");
+                fprintf(stderr, "使用 -h 查看帮助\n");
+                return 1;
+        }
     }
 
     init_random();
@@ -1571,9 +1714,54 @@ int main(int argc, char **argv) {
     OPENSSL_init_ssl(0, NULL);
 
     init_locations();
+
+    if (opt_clear_cache_flag) {
+        clear_cache();
+        if (opt_noninteractive) goto cleanup;
+    }
+    if (opt_update_flag) {
+        update_data();
+        if (opt_noninteractive) goto cleanup;
+    }
+
+    if (opt_single_ip_mode) {
+        run_single_speed_test_cli(opt_single_ip, opt_port, opt_use_tls);
+        goto cleanup;
+    }
+
+    if (opt_noninteractive) {
+        int speed = opt_bandwidth * 128;
+        long long start = now_ms();
+        CloudflareResult res = cloudflare_test(opt_ip_type, opt_use_tls, opt_task_num, speed);
+        long long end = now_ms();
+        int real_bandwidth = res.max_speed_kbps / 128;
+
+        if (opt_json_output) {
+            printf("{\n");
+            printf("  \"ip\": \"%s\",\n", res.ip);
+            printf("  \"max_speed_kbps\": %d,\n", res.max_speed_kbps);
+            printf("  \"tcp_ms\": %d,\n", res.tcp_ms);
+            printf("  \"real_bandwidth_mbps\": %d,\n", real_bandwidth);
+            printf("  \"target_bandwidth_mbps\": %d,\n", opt_bandwidth);
+            printf("  \"data_center\": \"%s\",\n", res.data_center);
+            printf("  \"elapsed_seconds\": %lld\n", (end - start) / 1000LL);
+            printf("}\n");
+        } else {
+            printf("优选 IP: %s\n", res.ip);
+            printf("实测带宽: %d Mbps\n", real_bandwidth);
+            printf("峰值速度: %d kB/s\n", res.max_speed_kbps);
+            printf("往返延迟: %d 毫秒\n", res.tcp_ms);
+            printf("数据中心: %s\n", res.data_center);
+            printf("总计用时: %lld 秒\n", (end - start) / 1000LL);
+        }
+        goto cleanup;
+    }
+
     show_menu();
 
+cleanup:
     if (rtt_ssl_ctx) SSL_CTX_free(rtt_ssl_ctx);
     curl_global_cleanup();
     return 0;
 }
+#endif

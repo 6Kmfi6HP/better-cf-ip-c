@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -pthread
+
 PKG_CFLAGS := $(shell pkg-config --cflags libcurl openssl 2>/dev/null)
 PKG_LIBS := $(shell pkg-config --libs libcurl openssl 2>/dev/null)
 ifeq ($(strip $(PKG_LIBS)),)
@@ -8,11 +8,43 @@ endif
 
 TARGET := better-cf-ip-c
 SRC := better_cf_ip.c
+TEST_SRC := test_better_cf_ip.c
+TEST_BIN := test_runner
 
-all: $(TARGET)
+WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wconversion \
+            -Wstrict-prototypes -Wold-style-definition -Wmissing-prototypes \
+            -Wmissing-declarations -Wcast-qual -Wwrite-strings
+
+.PHONY: all release debug asan test format clean
+.DEFAULT_GOAL := release
+
+all: release
+
+release: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(PKG_CFLAGS) -o $@ $< $(PKG_LIBS) -pthread
+	$(CC) -O3 -std=c11 -Wall -Wextra -pedantic $(PKG_CFLAGS) -o $@ $< $(PKG_LIBS) -pthread
+
+debug: $(TARGET)-debug
+
+$(TARGET)-debug: $(SRC)
+	$(CC) -O0 -g3 -ggdb -std=c11 $(WARNINGS) $(PKG_CFLAGS) -o $@ $< $(PKG_LIBS) -pthread
+
+asan: $(TARGET)-asan
+
+$(TARGET)-asan: $(SRC)
+	$(CC) -O1 -g -std=c11 $(WARNINGS) -fsanitize=address -fsanitize=undefined \
+		-fno-omit-frame-pointer $(PKG_CFLAGS) -o $@ $< $(PKG_LIBS) -pthread
+
+test: $(TEST_BIN)
+	./$(TEST_BIN)
+
+$(TEST_BIN): $(TEST_SRC) $(SRC)
+	$(CC) -DUNIT_TESTING -O0 -g -std=c11 $(WARNINGS) $(PKG_CFLAGS) -o $@ $^ $(PKG_LIBS) -pthread
+
+format:
+	clang-format -i -style=file $(SRC)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(TARGET)-debug $(TARGET)-asan $(TEST_BIN)
+	rm -rf $(TARGET)-debug.dSYM $(TARGET)-asan.dSYM $(TEST_BIN).dSYM
