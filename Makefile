@@ -1,12 +1,33 @@
 CC ?= gcc
 
+# Detect OS
+UNAME_S := $(shell uname -s)
+
+# macOS Homebrew openssl is keg-only, need explicit pkg-config path
+ifeq ($(UNAME_S),Darwin)
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+ifneq ($(BREW_PREFIX),)
+BREW_OPENSSL := $(BREW_PREFIX)/opt/openssl@3
+ifneq ($(wildcard $(BREW_OPENSSL)/lib/pkgconfig),)
+export PKG_CONFIG_PATH := $(BREW_OPENSSL)/lib/pkgconfig:$(PKG_CONFIG_PATH)
+endif
+endif
+endif
+
 PKG_CFLAGS := $(shell pkg-config --cflags libcurl openssl 2>/dev/null)
 PKG_LIBS := $(shell pkg-config --libs libcurl openssl 2>/dev/null)
 ifeq ($(strip $(PKG_LIBS)),)
 PKG_LIBS := -lcurl -lssl -lcrypto
 endif
 
+# Platform-specific settings
+ifneq (,$(findstring MINGW,$(UNAME_S)))
+TARGET := better-cf-ip-c.exe
+PKG_LIBS += -lws2_32
+else
 TARGET := better-cf-ip-c
+endif
+
 SRC := better_cf_ip.c
 TEST_SRC := test_better_cf_ip.c
 TEST_BIN := test_runner

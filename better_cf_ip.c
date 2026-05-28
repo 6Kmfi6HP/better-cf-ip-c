@@ -1,14 +1,29 @@
 #define _POSIX_C_SOURCE 200809L
-#define _GNU_SOURCE
 
+/* Platform-specific includes */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+/* Winsock2 provides all socket/networking types and functions */
+#include <winsock2.h>
+#include <ws2tcpip.h>       /* inet_pton, inet_ntop */
+/* Note: MinGW-w64 UCRT64 does NOT provide POSIX compat headers
+   such as sys/socket.h, netinet/, arpa/inet.h, sys/select.h.
+   We use pure Winsock2 on this platform. */
+#else
+#define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#endif
+
 #include <ctype.h>
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
@@ -19,14 +34,64 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/select.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <getopt.h>
+
+/* ---------- Platform compatibility layer ---------- */
+#ifdef _WIN32
+
+/* WSAStartup / WSACleanup with reference counting */
+static int wsa_refcount = 0;
+static int wsa_init(void) {
+    if (wsa_refcount == 0) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+    }
+    wsa_refcount++;
+    return 0;
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused)) static void wsa_cleanup(void) {
+#else
+static void wsa_cleanup(void) {
+#endif
+    if (wsa_refcount > 0 && --wsa_refcount == 0) WSACleanup();
+}
+
+/* Winsock2 socket() returns SOCKET (uintptr_t); wrap to return int */
+#undef socket
+#define socket(d, t, p) ((int)(WSASocketA)((d), (t), (p), NULL, 0, 0))
+
+/* Socket close on Windows uses closesocket() */
+#define socket_close(fd) closesocket((SOCKET)(fd))
+
+/* Non-blocking mode via ioctlsocket() on Windows */
+static int set_fd_blocking(int fd, int blocking) {
+    unsigned long mode = blocking ? 0 : 1;
+    return ioctlsocket((SOCKET)(fd), FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
+/* mkdir() is POSIX only; Windows mkdir takes one arg (mode ignored) */
+#undef mkdir
+#define mkdir(path, mode) ((void)(mode), (mkdir)(path))
+
+/* Winsock2 setsockopt/getsockopt take (const char *) optval, not (const void *) */
+#undef setsockopt
+#define setsockopt(s, l, o, v, n) \
+    ((setsockopt)((SOCKET)(s), (l), (o), (const char *)(v), (n)))
+#undef getsockopt
+#define getsockopt(s, l, o, v, n) \
+    ((getsockopt)((SOCKET)(s), (l), (o), (char *)(v), (n)))
+
+#else /* POSIX */
+
+/* Socket close on POSIX uses close() */
+#define socket_close(fd) close(fd)
+
+#endif /* _WIN32 */
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -710,6 +775,7 @@ static int json_extract_string(const char *obj_start, const char *obj_end,
 
 /* ----------------------- 连接、RTT、HTTP 响应头检测 ----------------------- */
 
+#ifndef _WIN32
 static int set_fd_blocking(int fd, int blocking) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
@@ -717,6 +783,7 @@ static int set_fd_blocking(int fd, int blocking) {
     else flags |= O_NONBLOCK;
     return fcntl(fd, F_SETFL, flags);
 }
+#endif
 
 static int set_socket_timeout_ms(int fd, int timeout_ms) {
     if (timeout_ms < 1) timeout_ms = 1;
@@ -754,14 +821,14 @@ static int connect_tcp_timeout(const char *ip, int port, int timeout_ms, int *tc
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     if (set_fd_blocking(fd, 0) != 0) {
-        close(fd);
+        socket_close(fd);
         return -1;
     }
 
     long long start = now_ms();
     int rc = connect(fd, (struct sockaddr *)&ss, ss_len);
     if (rc != 0 && errno != EINPROGRESS) {
-        close(fd);
+        socket_close(fd);
         return -1;
     }
 
@@ -774,13 +841,13 @@ static int connect_tcp_timeout(const char *ip, int port, int timeout_ms, int *tc
         tv.tv_usec = (timeout_ms % 1000) * 1000;
         rc = select(fd + 1, NULL, &wfds, NULL, &tv);
         if (rc <= 0) {
-            close(fd);
+            socket_close(fd);
             return -1;
         }
         int so_error = 0;
         socklen_t len = sizeof(so_error);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
-            close(fd);
+            socket_close(fd);
             return -1;
         }
     }
@@ -921,7 +988,7 @@ static int test_rtt(const char *ip, int use_tls) {
         long long deadline = start + 1000LL;
         int rem = (int)(deadline - now_ms());
         if (rem <= 0) {
-            close(fd);
+            socket_close(fd);
             return 0;
         }
         set_socket_timeout_ms(fd, rem);
@@ -935,12 +1002,12 @@ static int test_rtt(const char *ip, int use_tls) {
         if (use_tls) {
             pthread_once(&rtt_ssl_once, rtt_ssl_init_once);
             if (!rtt_ssl_ctx) {
-                close(fd);
+                socket_close(fd);
                 return 0;
             }
             SSL *ssl = SSL_new(rtt_ssl_ctx);
             if (!ssl) {
-                close(fd);
+                socket_close(fd);
                 return 0;
             }
             SSL_set_fd(ssl, fd);
@@ -960,7 +1027,7 @@ static int test_rtt(const char *ip, int use_tls) {
                 ok = 1;
             }
         }
-        close(fd);
+        socket_close(fd);
         if (!ok) return 0;
     }
     return total_ms / 3;
@@ -1634,7 +1701,15 @@ static void show_menu(void) {
 
 #ifndef UNIT_TESTING
 int main(int argc, char **argv) {
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
+#ifdef _WIN32
+    if (wsa_init() != 0) {
+        fprintf(stderr, "WSAStartup failed\n");
+        return 1;
+    }
+#endif
 
     /* 解析 --data-dir 旧式参数 (保持兼容) */
     const char *env_dir = getenv("BETTER_CF_IP_DATA_DIR");
