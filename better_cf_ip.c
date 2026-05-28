@@ -3,11 +3,12 @@
 /* Platform-specific includes */
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+/* Winsock2 provides all socket/networking types and functions */
+#include <winsock2.h>
 #include <ws2tcpip.h>       /* inet_pton, inet_ntop */
-#include <sys/socket.h>     /* POSIX socket compat */
-#include <netinet/in.h>     /* sockaddr_in, etc. */
-#include <netinet/tcp.h>    /* TCP_NODELAY */
-#include <sys/time.h>       /* timeval */
+/* Note: MinGW-w64 UCRT64 does NOT provide POSIX compat headers
+   (sys/socket.h, netinet/*.h, arpa/inet.h, sys/select.h, sys/time.h).
+   We use pure Winsock2 on this platform. */
 #else
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -56,14 +57,18 @@ static void wsa_cleanup(void) {
     if (wsa_refcount > 0 && --wsa_refcount == 0) WSACleanup();
 }
 
+/* Winsock2 socket() returns SOCKET (uintptr_t); wrap to return int */
+#undef socket
+#define socket(d, t, p) ((int)WSASocketA((d), (t), (p), NULL, 0, 0))
+
 /* Socket close on Windows uses closesocket() */
 #undef socket_close
-#define socket_close(fd) closesocket(fd)
+#define socket_close(fd) closesocket((SOCKET)(fd))
 
 /* Non-blocking mode via ioctlsocket() on Windows */
 static int set_fd_blocking(int fd, int blocking) {
-    u_long mode = blocking ? 0 : 1;
-    return ioctlsocket(fd, FIONBIO, &mode) == 0 ? 0 : -1;
+    unsigned long mode = blocking ? 0 : 1;
+    return ioctlsocket((SOCKET)(fd), FIONBIO, &mode) == 0 ? 0 : -1;
 }
 
 #else /* POSIX */
