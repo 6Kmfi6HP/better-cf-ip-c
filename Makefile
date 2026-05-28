@@ -23,6 +23,7 @@ endif
 # Platform-specific settings
 ifneq (,$(findstring MINGW,$(UNAME_S)))
 TARGET := better-cf-ip-c.exe
+PKG_LIBS += -lws2_32
 else
 TARGET := better-cf-ip-c
 endif
