@@ -7,7 +7,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>       /* inet_pton, inet_ntop */
 /* Note: MinGW-w64 UCRT64 does NOT provide POSIX compat headers
-   such as sys/socket.h, netinet/*.h, arpa/inet.h, sys/select.h.
+   such as sys/socket.h, netinet/, arpa/inet.h, sys/select.h.
    We use pure Winsock2 on this platform. */
 #else
 #define _GNU_SOURCE
@@ -74,9 +74,9 @@ static int set_fd_blocking(int fd, int blocking) {
     return ioctlsocket((SOCKET)(fd), FIONBIO, &mode) == 0 ? 0 : -1;
 }
 
-/* mkdir() is POSIX only; Windows mkdir takes one arg */
+/* mkdir() is POSIX only; Windows mkdir takes one arg (mode ignored) */
 #undef mkdir
-#define mkdir(path, mode) _mkdir(path)
+#define mkdir(path, mode) ((void)(mode), (mkdir)(path))
 
 /* Winsock2 setsockopt/getsockopt take (const char *) optval, not (const void *) */
 #undef setsockopt
